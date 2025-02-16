@@ -8,6 +8,9 @@ struct BattagliaTauProfile{T,C,ANG} <: AbstractGNFW{T}
     cosmo::C
 end
 
+# check if the tau profile is in terms of angle or distance; usually should be in angle
+isangletypeparameter(::BattagliaTauProfile{T,C,true}) where {T,C} = true
+isangletypeparameter(::BattagliaTauProfile{T,C,false}) where {T,C} = false
 
 function BattagliaTauProfile(; Omega_c::T=0.2589, Omega_b::T=0.0486, h::T=0.6774, angle=true) where {T <: Real}
     OmegaM=Omega_b+Omega_c
@@ -28,8 +31,8 @@ function get_params(::BattagliaTauProfile{T}, M_200, z) where T
 end
 
 
-function ρ_crit_comoving_h⁻²(p, z)
-    return  (ρ_crit(p, z) ) / (1+z)^3 / p.cosmo.h^2
+function ρ_crit_comoving_h⁻²(model, z)
+    return  (ρ_crit(model, z) ) / (1+z)^3 / model.cosmo.h^2
 end
 
 function r200c_comoving(p, m200c, z)
@@ -38,14 +41,14 @@ function r200c_comoving(p, m200c, z)
 end
 
 
-function object_size(𝕡::BattagliaTauProfile{T,C,true}, physical_size, z) where {T,C}
-    d_A = angular_diameter_dist(𝕡.cosmo, z)
+function object_size(model::BattagliaTauProfile{T,C,true}, physical_size, z) where {T,C}
+    d_A = angular_diameter_dist(model.cosmo, z)
     phys_siz_unitless = T(ustrip(uconvert(unit(d_A), physical_size)))
     d_A_unitless = T(ustrip(d_A))
     return atan(phys_siz_unitless, d_A_unitless)
 end
 
-function object_size(𝕡::BattagliaTauProfile{T,C,false}, physical_size, z) where {T,C}
+function object_size(model::BattagliaTauProfile{T,C,false}, physical_size, z) where {T,C}
     return physical_size
 end
 
@@ -61,14 +64,14 @@ function rho_2d(p::BattagliaTauProfile, r, m200c, z)
     return result * rho_crit * (r200c * (1+z))
 end
 
-function ne2d(p::BattagliaTauProfile, r, m200c, z)
+function ne2d(model::BattagliaTauProfile, r, m200c, z)
     me = constants.ElectronMass
     mH = constants.ProtonMass
     mHe = 4mH
     xH = 0.76
     nH_ne = 2xH / (xH + 1)
     nHe_ne = (1 - xH)/(2 * (1 + xH))
-    factor = (me + nH_ne*mH + nHe_ne*mHe) / p.cosmo.h^2
+    factor = (me + nH_ne*mH + nHe_ne*mHe) / model.cosmo.h^2
 
     result = rho_2d(p, r, m200c, z)  # (Msun/h) / (Mpc/h)^2
     return result / factor
@@ -80,7 +83,11 @@ function tau(p, r, m200c, z)
     return constants.ThomsonCrossSection * ne2d(p, r, m200c, z) 
 end
 
-function profile_grid(𝕡::BattagliaTauProfile{T,C,true}, logθs, redshifts, logMs) where {T,C}
+function (::BattagliaTauProfile)(model::BattagliaTauProfile, r, m200c, z)
+    return tau(model, r, m200c, z)
+end
+
+function profile_grid(model::BattagliaTauProfile{T,C,true}, logθs, redshifts, logMs) where {T,C}
 
     N_logθ, N_z, N_logM = length(logθs), length(redshifts), length(logMs)
     A = zeros(T, (N_logθ, N_z, N_logM))
@@ -91,7 +98,7 @@ function profile_grid(𝕡::BattagliaTauProfile{T,C,true}, logθs, redshifts, lo
         for (iz, z) in enumerate(redshifts)
             for iθ in 1:N_logθ
                 θ = exp(logθs[iθ])
-                τ = tau(𝕡, θ, M, z)
+                τ = tau(model, θ, M, z)
                 A[iθ, iz, im] = max(zero(T), τ)
             end
         end
@@ -101,7 +108,7 @@ function profile_grid(𝕡::BattagliaTauProfile{T,C,true}, logθs, redshifts, lo
 end
 
 # multi-halo painting utilities
-function paint!(m, p::BattagliaTauProfile, workspace, sitp, 
+function paint!(m, model::BattagliaTauProfile, workspace, 
                 masses::AV, redshifts::AV, αs::AV, δs::AV, velocities::AV,
                 irange::AbstractUnitRange) where AV
     for i in irange
@@ -111,11 +118,10 @@ function paint!(m, p::BattagliaTauProfile, workspace, sitp,
         z = redshifts[i]
         v = velocities[i]
 
-        θmax_ = θmax(p, mh * XGPaint.M_sun, z)
-        profile_paint!(m, α₀, δ₀, workspace, sitp, z, mh, θmax_, v)
+        θmax_ = compute_θmax(p, mh * XGPaint.M_sun, z)
+        profile_paint!(m, α₀, δ₀, workspace, model, z, mh, θmax_, v)
     end
 end
-
 
 
 function paint!(m::HealpixMap{T, RingOrder}, p::BattagliaTauProfile, ws::Vector{W}, interp, masses::AV, 
@@ -139,7 +145,7 @@ function paint!(m::HealpixMap{T, RingOrder}, p::BattagliaTauProfile, ws::Vector{
     end
 end
 
-function paint!(m, p::BattagliaTauProfile, workspace, sitp, masses::AV, 
+function paint!(m, model::BattagliaTauProfile, workspace, masses::AV, 
                         redshifts::AV, αs::AV, δs::AV, vs::AV)  where AV
     fill!(m, 0)
     
@@ -148,18 +154,18 @@ function paint!(m, p::BattagliaTauProfile, workspace, sitp, masses::AV,
     chunks = chunk(N_sources, chunksize);
 
     if N_sources < 2Threads.nthreads()  # don't thread if there are not many sources
-        return paint!(m, p, workspace, sitp, masses, redshifts, αs, δs, 1:N_sources)
+        return paint!(m, model, workspace, masses, redshifts, αs, δs, vs, 1:N_sources)
     end
     
     Threads.@threads :static for i in 1:Threads.nthreads()
         chunk_i = 2i
         i1, i2 = chunks[chunk_i]
-        paint!(m, p, workspace, sitp, masses, redshifts, αs, δs, vs, i1:i2)
+        paint!(m, model, workspace, masses, redshifts, αs, δs, vs, i1:i2)
     end
 
     Threads.@threads :static for i in 1:Threads.nthreads()
         chunk_i = 2i - 1
         i1, i2 = chunks[chunk_i]
-        paint!(m, p, workspace, sitp, masses, redshifts, αs, δs, vs, i1:i2)
+        paint!(m, model, workspace, masses, redshifts, αs, δs, vs, i1:i2)
     end
 end
